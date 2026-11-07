@@ -100,6 +100,8 @@
   .monthRow .delM{background:var(--red);color:#fff;border:none;border-radius:8px;width:30px;height:34px;flex-shrink:0;font-size:13px;font-weight:800;}
   .lockNote{margin:8px 14px 0;padding:9px 12px;border-radius:10px;background:rgba(47,125,79,0.08);color:#2f7d4f;font-size:11.5px;font-weight:700;line-height:1.5;}
   .adminTool{width:100%;padding:12px;border:none;border-radius:10px;font-weight:800;font-family:inherit;font-size:13.5px;margin-top:8px;}
+  .diagBtn{display:block;margin:10px auto 0;background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.35);color:#fff;border-radius:16px;padding:5px 12px;font-size:11.5px;font-weight:700;font-family:inherit;}
+  #diagOut{font-size:12.5px;line-height:1.7;white-space:pre-wrap;word-break:break-all;background:var(--cream);border-radius:10px;padding:10px;max-height:55vh;overflow:auto;}
   .screen{display:none;}
   .screen.active{display:block;}
   .menuIntro{text-align:center;padding:22px 14px 8px;}
@@ -115,15 +117,15 @@
   .selectedInfo{margin:14px 14px 0;padding:12px 14px;border-radius:12px;background:rgba(143,31,31,.07);font-weight:900;color:var(--red);text-align:center;}
 
 </style>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
 
 <header>
   <button class="adminBtn" id="adminBtn" onclick="openAdmin()">🔒 관리자</button>
   <button class="histBtn" onclick="openHistory()">📋 기록</button>
+  <button class="diagBtn" onclick="runDiagnostic()">🔧 연결 테스트</button>
   <div class="title">소방안전</div>
-  <div class="sub">매장별 소화기 월간 점검</div>
+  <div class="sub">매장별 소화기 월간 점검 · <span id="verLabel">v3.0</span></div>
 </header>
 
 
@@ -291,6 +293,18 @@
     <div id="historyList"></div>
     <div class="modalBtnRow">
       <button style="background:var(--line);color:var(--ink);" onclick="closeHistoryModal()">닫기</button>
+    </div>
+  </div>
+</div>
+
+<!-- 연결 테스트 모달 -->
+<div class="modalOverlay" id="diagModal">
+  <div class="modalBox">
+    <h2>연결 테스트</h2>
+    <div id="diagOut">확인 중…</div>
+    <div class="modalBtnRow">
+      <button style="background:var(--line);color:var(--ink);" onclick="document.getElementById('diagModal').classList.remove('show')">닫기</button>
+      <button style="background:var(--red);color:#fff;" onclick="shareDiag()">결과 보내기</button>
     </div>
   </div>
 </div>
@@ -510,10 +524,10 @@ function saveSignature(){
   }
   if(!sigHasInk){ showToast('서명을 그려주세요'); return; }
   // 용량을 줄여서 저장 (느린 인터넷에서도 공용 저장 실패 방지)
-  const w = 480, h = Math.round(w * canvas.height / canvas.width);
+  const w = 320, h = Math.round(w * canvas.height / canvas.width);
   const small = document.createElement('canvas'); small.width = w; small.height = h;
-  const sctx = small.getContext('2d'); sctx.fillStyle = '#faf6ee'; sctx.fillRect(0,0,w,h); sctx.drawImage(canvas,0,0,w,h);
-  const dataUrl = small.toDataURL('image/jpeg', 0.75);
+  const sctx = small.getContext('2d'); sctx.fillStyle = '#ffffff'; sctx.fillRect(0,0,w,h); sctx.drawImage(canvas,0,0,w,h);
+  const dataUrl = small.toDataURL('image/png');
   if(sigTarget.type==='manager'){
     currentRecord.managerSig = dataUrl; markExtDirty('managerSig');
   } else {
@@ -860,18 +874,51 @@ function viewHistoryItem(i){
 
 
 
-/* ================= Supabase 전체 공동 저장 (보완판) ================= */
-const SUPABASE_URL = 'https://ejbtdeqrplivqcxlqzyq.supabase.co';
-const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_dr7oQNkK41R3BbDeyBk2fg_xdp1XLRe';
+/* ================= Firebase 공용 저장 (무료 · 일시정지 없음) ================= */
+const FB_CONFIG = {
+  apiKey: "AIzaSyCaj5m5klkQCAC-C7mmoWWsLCbuVxPsS00",
+  authDomain: "choiwooyoung-group-89e95.firebaseapp.com",
+  projectId: "choiwooyoung-group-89e95",
+  storageBucket: "choiwooyoung-group-89e95.firebasestorage.app",
+  messagingSenderId: "257145752605",
+  appId: "1:257145752605:web:3a39c330dbc08ca267caf4"
+};
+const FS_COL = 'fireSafetyRecords';      // 소화기 1대 · 1년 = 문서 1개 (용량 최소화)
 const ADMIN_PIN = '5324';
 const PENDING_KEY = 'cwyfire2_pending_v1';
-let sb = null;
-try{ if(window.supabase) sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY); }catch(e){ console.error(e); }
+const APP_VERSION = '3.0';
+const EXT_FIELDS = ['kg','serial','managerName','managerSig'];
+
+let fdb = null, fbLoading = null;
+function loadScript(src){
+  return new Promise((res,rej)=>{
+    const s = document.createElement('script');
+    s.src = src; s.async = true;
+    s.onload = res; s.onerror = ()=>rej({code:'unavailable', message:'Failed to fetch'});
+    document.head.appendChild(s);
+  });
+}
+/* 화면을 먼저 띄우고 Firebase는 나중에 불러옴 (느린 폰에서도 멈추지 않음) */
+function getDb(){
+  if(fdb) return Promise.resolve(fdb);
+  if(!fbLoading){
+    fbLoading = (async()=>{
+      await loadScript('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
+      await loadScript('https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js');
+      if(!firebase.apps.length) firebase.initializeApp(FB_CONFIG);
+      fdb = firebase.firestore();
+      return fdb;
+    })().catch(e=>{ fbLoading = null; throw e; });
+  }
+  return fbLoading;
+}
+function docId(store, no, year){ return store+'_'+no+'_'+year; }
+function docRef(db, store, no, year){ return db.collection(FS_COL).doc(docId(store,no,year)); }
 
 let isAdmin = false;
 try{ isAdmin = sessionStorage.getItem('cwyfire2_admin')==='1'; }catch(e){}
 
-/* 잠금: 이미 공용으로 올라간 내용은 직원이 수정 불가, 관리자만 수정·삭제 */
+/* 잠금: 이미 공용으로 올라간 칸은 직원이 수정 불가, 관리자만 수정·삭제 */
 let lockState = null;
 function resetLock(){ lockState = {kg:false, serial:false, jeongbu:false, managerName:false, managerSig:false, months:Array(12).fill(false)}; }
 resetLock();
@@ -889,102 +936,41 @@ function withTimeout(p, ms){
 }
 function errMsg(e){
   if(!e) return '알 수 없는 오류';
-  const m = String(e.message||e) + ' ' + String(e.code||'');
-  if(!navigator.onLine || /Failed to fetch|NetworkError|network|Load failed/i.test(m)) return '인터넷 연결 확인';
-  if(/timeout/i.test(m)) return '서버 응답 지연';
-  if(/row-level|policy|permission|42501/i.test(m)) return 'DB 권한 설정 필요';
-  if(/does not exist|42P01|PGRST205|schema cache/i.test(m)) return 'DB 테이블/컬럼 확인 필요';
+  const m = String(e.code||'')+' '+String(e.message||e);
+  if(/permission-denied|insufficient permissions/i.test(m)) return 'Firebase 보안 규칙에 허용 추가 필요';
+  if(!navigator.onLine || /unavailable|Failed to fetch|network|offline/i.test(m)) return '인터넷 연결 확인';
+  if(/timeout|deadline/i.test(m)) return '서버 응답 지연';
+  if(/resource-exhausted|quota/i.test(m)) return '오늘 무료 사용량 초과 (내일 자동 복구)';
+  if(/invalid-argument|too large|exceeds/i.test(m)) return '저장 용량 초과';
   if(/pin/i.test(m)) return '관리자 비밀번호 불일치';
   return m.trim().slice(0,60);
 }
-/* 실패하면 한 번 더 자동 재시도 */
-async function q(fn, tries){
-  tries = tries || 2;
-  let last;
-  for(let i=0;i<tries;i++){
-    try{
-      const r = await withTimeout(fn(), 15000);
-      if(r && r.error) throw r.error;
-      return r;
-    }catch(e){ last = e; if(i<tries-1) await sleep(900); }
-  }
-  throw last;
-}
-/* updated_at 컬럼이 없어도 저장되도록 */
-async function writeRow(table, action, payload, match){
-  const run = (p)=>()=>{
-    let b = action==='insert' ? sb.from(table).insert(p) : sb.from(table).update(p);
-    if(match) Object.keys(match).forEach(k=>{ b = b.eq(k, match[k]); });
-    return b.select();
-  };
-  try{ return await q(run(payload)); }
-  catch(e){
-    if(/updated_at/.test(String(e.message||''))){ const p = Object.assign({}, payload); delete p.updated_at; return await q(run(p)); }
-    throw e;
-  }
-}
-
-function parseExtMeta(v){
-  try{ const x = JSON.parse(v||'{}'); return (x && typeof x==='object') ? x : {}; }catch(e){ return {}; }
-}
-function rowHas(r){ return !!(r && (String(r.inspector||'').trim() || r.signature || String(r.note||'').trim())); }
-function rowScore(r){ return (r.signature?2:0) + (String(r.inspector||'').trim()?1:0) + (String(r.note||'').trim()?1:0); }
-function rowTs(r){ return r && r.updated_at ? Date.parse(r.updated_at)||0 : 0; }
+function cHas(c){ return !!(c && (String(c.n||'').trim() || c.s || String(c.d||'').trim())); }
 function monthHas(m){ return !!(String(m.name||'').trim() || m.sig || String(m.day||'').trim()); }
-
-/* 중복 행이 있어도 오류 없이 가장 완성된 기록을 선택 (기존 데이터는 건드리지 않음) */
-async function fetchCloud(store, no, year){
-  if(!sb) throw {message:'Failed to fetch'};
-  const [er, ir] = await Promise.all([
-    q(()=>sb.from('fire_extinguishers').select('*').eq('store',store).eq('extinguisher_no',no)),
-    q(()=>sb.from('fire_inspections').select('*').eq('store',store).eq('extinguisher_no',no).eq('inspection_year',Number(year)))
-  ]);
-  const exts = er.data || [];
-  let ext = null, best = -1;
-  exts.forEach(r=>{
-    const meta = parseExtMeta(r.location);
-    const s = (r.kg?1:0)+(r.serial_no?1:0)+(meta.managerName?1:0)+(meta.managerSig?1:0);
-    if(s>best || (s===best && rowTs(r)>rowTs(ext))){ best = s; ext = r; }
-  });
-  const months = Array(12).fill(null);
-  (ir.data||[]).forEach(r=>{
-    const i = Number(r.inspection_month)-1;
-    if(i<0||i>11) return;
-    const cur = months[i];
-    if(!cur || rowScore(r)>rowScore(cur) || (rowScore(r)===rowScore(cur) && rowTs(r)>rowTs(cur))) months[i] = r;
-  });
-  return {ext, months};
-}
+function sameMonth(m, c){ return (m.day||'')===(c.d||'') && (m.name||'')===(c.n||'') && (m.sig||null)===(c.s||null); }
 
 /* 공용 기록을 이 폰 기록에 합치기 (빈 공용 기록이 이 폰 입력을 지우지 않음) */
-function applyCloud(rec, c){
+function applyCloud(rec, d){
   resetLock();
+  d = d || {};
+  const cm = d.months || {};
   rec.syncedExt = rec.syncedExt || {};
-  const meta = c.ext ? parseExtMeta(c.ext.location) : {};
-  const cloudVals = {
-    kg: c.ext ? (c.ext.kg||'') : '',
-    serial: c.ext ? (c.ext.serial_no||'') : '',
-    managerName: meta.managerName || '',
-    managerSig: meta.managerSig || null
-  };
-  Object.keys(cloudVals).forEach(f=>{
-    const v = cloudVals[f];
+  EXT_FIELDS.forEach(f=>{
+    const v = d[f] || '';
     if(v){ rec[f] = v; rec.syncedExt[f] = true; lockState[f] = true; }
-    else if(rec.syncedExt[f]){ rec[f] = (f==='managerSig') ? null : ''; rec.syncedExt[f] = false; } // 관리자가 삭제한 항목
+    else if(rec.syncedExt[f]){ rec[f] = (f==='managerSig') ? null : ''; rec.syncedExt[f] = false; } // 관리자가 삭제
   });
-  if(meta.jeongbu && (cloudVals.kg || cloudVals.serial)){ rec.jeongbu = meta.jeongbu; lockState.jeongbu = true; }
-  c.months.forEach((r,i)=>{
-    const m = rec.months[i];
-    if(rowHas(r)){
-      m.day = r.note||''; m.name = r.inspector||''; m.sig = r.signature||null;
-      m.synced = true; lockState.months[i] = true;
-    } else if(m.synced){ m.day=''; m.name=''; m.sig=null; m.synced=false; } // 관리자가 삭제한 월
+  if(d.jeongbu && (d.kg || d.serial)){ rec.jeongbu = d.jeongbu; lockState.jeongbu = true; }
+  rec.months.forEach((m,i)=>{
+    const c = cm[String(i+1)];
+    if(cHas(c)){ m.day = c.d||''; m.name = c.n||''; m.sig = c.s||null; m.synced = true; lockState.months[i] = true; }
+    else if(m.synced){ m.day=''; m.name=''; m.sig=null; m.synced=false; } // 관리자가 삭제한 월
   });
 }
 function hasUnsynced(rec){
   const se = rec.syncedExt || {};
   if(rec.months.some(m=>monthHas(m) && !m.synced)) return true;
-  return ['kg','serial','managerName','managerSig'].some(f=>rec[f] && !se[f]);
+  return EXT_FIELDS.some(f=>rec[f] && !se[f]);
 }
 
 /* ---------- 동기화 상태 표시 ---------- */
@@ -993,83 +979,81 @@ function setSync(kind, text){
   if(!el) return;
   const color = {ok:'#2f7d4f', warn:'#a5761b', err:'#b23b3b', loading:'#8a7f6a'}[kind] || '#8a7f6a';
   el.style.color = color;
-  el.innerHTML = escapeHtml(text) + (kind==='err' ? ' <button class="retryBtn" onclick="refreshCloudForCurrent()">다시 시도</button>' : '');
+  el.innerHTML = escapeHtml(text) + (kind==='err' ? ' <button class="retryBtn" onclick="refreshCloudForCurrent()">다시 시도</button> <button class="retryBtn" style="background:#5a4310" onclick="runDiagnostic()">원인 확인</button>' : '');
 }
 
-/* ---------- 불러오기 ---------- */
-let loadSeq = 0;
+/* ---------- 실시간 불러오기 (다른 폰이 저장하면 바로 보임) ---------- */
+let loadSeq = 0, unsubDoc = null, renderPending = false;
+function isTyping(){ const a = document.activeElement; return a && (a.tagName==='INPUT' || a.tagName==='SELECT') && a.closest('#inspectionScreen'); }
+document.addEventListener('focusout', ()=>{ setTimeout(()=>{ if(renderPending && !isTyping()){ renderPending=false; renderAll(); } }, 50); });
+
 async function refreshCloudForCurrent(){
   const no = extNo(); if(!no) return;
   const store = currentStore, year = String(currentRecord.year||thisYear), seq = ++loadSeq;
+  if(unsubDoc){ unsubDoc(); unsubDoc = null; }
   setSync('loading','공용 기록 불러오는 중…');
   try{
-    const c = await fetchCloud(store, no, year);
-    if(seq!==loadSeq || store!==currentStore || extNo()!==no || String(currentRecord.year)!==year) return;
-    applyCloud(currentRecord, c);
-    saveRecordObj(currentRecord);
-    renderAll();
-    if(hasUnsynced(currentRecord)) setSync('warn','공용에 아직 안 올라간 입력이 있어요 — 저장을 눌러주세요');
-    else setSync('ok','✓ 공용 기록 최신 상태' + (isAdmin ? ' · 관리자 모드' : ''));
+    const db = await withTimeout(getDb(), 20000);
+    if(seq!==loadSeq) return;
+    let first = true;
+    const timer = setTimeout(()=>{ if(seq===loadSeq && first) setSync('err','불러오기 지연 (인터넷 확인) · 이 폰 기록을 보여주는 중'); }, 15000);
+    unsubDoc = docRef(db, store, no, year).onSnapshot(snap=>{
+      clearTimeout(timer); first = false;
+      if(seq!==loadSeq) return;
+      applyCloud(currentRecord, snap.exists ? snap.data() : null);
+      saveRecordObj(currentRecord);
+      if(isTyping()) renderPending = true; else renderAll();
+      if(hasUnsynced(currentRecord)) setSync('warn','공용에 아직 안 올라간 입력이 있어요 — 저장을 눌러주세요');
+      else setSync('ok','✓ 공용 기록 최신 상태 (실시간)' + (isAdmin ? ' · 관리자 모드' : ''));
+    }, err=>{
+      clearTimeout(timer); console.error(err);
+      if(seq===loadSeq) setSync('err','불러오기 실패 ('+errMsg(err)+') · 이 폰 기록을 보여주는 중');
+    });
   }catch(e){
     console.error(e);
-    if(seq!==loadSeq) return;
-    setSync('err','불러오기 실패 ('+errMsg(e)+') · 이 폰에 저장된 기록을 보여주는 중');
+    if(seq===loadSeq) setSync('err','불러오기 실패 ('+errMsg(e)+') · 이 폰 기록을 보여주는 중');
   }
 }
 
-/* ---------- 저장 ---------- */
+/* ---------- 저장 (먼저 저장한 사람 기록 보호 · 빈 칸은 안 올림) ---------- */
 async function cloudSave(store, no, year, rec){
-  const c = await fetchCloud(store, no, year);   // 저장 직전 최신 공용 기록 확인
-  let saved = 0, kept = 0;
-  const now = new Date().toISOString();
-  rec.syncedExt = rec.syncedExt || {};
-
-  // 소화기 정보
-  const meta = c.ext ? parseExtMeta(c.ext.location) : {};
-  const cloud = {kg: c.ext?(c.ext.kg||''):'', serial: c.ext?(c.ext.serial_no||''):'', managerName: meta.managerName||'', managerSig: meta.managerSig||null};
-  const pick = (f)=>{
-    if(!isAdmin && cloud[f]){ if(rec[f] && rec[f]!==cloud[f]) kept++; rec[f] = cloud[f]; }
-    return rec[f] || (f==='managerSig' ? null : '');
-  };
-  const kg = pick('kg'), serial = pick('serial'), mName = pick('managerName'), mSig = pick('managerSig');
-  if(!isAdmin && meta.jeongbu && (cloud.kg||cloud.serial)) rec.jeongbu = meta.jeongbu;
-  const loc = JSON.stringify({jeongbu: rec.jeongbu||'정', managerName: mName, managerSig: mSig});
-  const extChanged = !c.ext || kg!==cloud.kg || serial!==cloud.serial || mName!==cloud.managerName || mSig!==cloud.managerSig || (meta.jeongbu||'정')!==(rec.jeongbu||'정');
-  if(kg||serial||mName||mSig||c.ext){
-    if(c.ext && extChanged){ await writeRow('fire_extinguishers','update',{kg, serial_no:serial, location:loc, updated_at:now},{store, extinguisher_no:no}); saved++; }
-    else if(!c.ext){ await writeRow('fire_extinguishers','insert',{store, extinguisher_no:no, kg, serial_no:serial, location:loc, updated_at:now}); saved++; }
-  }
-  ['kg','serial','managerName','managerSig'].forEach(f=>{ rec.syncedExt[f] = !!rec[f]; });
-
-  // 월별 점검 (빈 칸은 절대 올리지 않음 → 다른 사람 기록을 지우지 않음)
-  for(let i=0;i<12;i++){
-    const m = rec.months[i], r = c.months[i];
-    if(rowHas(r) && !isAdmin){
-      if(monthHas(m) && (m.name!==(r.inspector||'') || m.sig!==(r.signature||null) || m.day!==(r.note||''))) kept++;
-      m.day = r.note||''; m.name = r.inspector||''; m.sig = r.signature||null; m.synced = true;
-      continue;
-    }
-    if(!monthHas(m)){ m.synced = false; continue; }
-    if(rowHas(r) && m.name===(r.inspector||'') && m.sig===(r.signature||null) && m.day===(r.note||'')){ m.synced = true; continue; }
-    const payload = {inspector:m.name||'', result:'정상', note:m.day||'', signature:m.sig||null, updated_at:now};
-    const match = {store, extinguisher_no:no, inspection_year:Number(year), inspection_month:i+1};
-    try{
-      if(r){
-        const res = await writeRow('fire_inspections','update',payload,match);
-        if(!res.data || res.data.length===0){
-          if(isAdmin) await adminSaveMonth(store,no,year,i,m);
-          else { kept++; continue; }   // 다른 사람이 먼저 저장한 칸
-        }
-      } else {
-        await writeRow('fire_inspections','insert',Object.assign({}, match, payload));
+  const db = await withTimeout(getDb(), 20000);
+  const ref = docRef(db, store, no, year);
+  let result = {saved:0, kept:0};
+  await withTimeout(db.runTransaction(async tx=>{
+    const snap = await tx.get(ref);
+    const cur = snap.exists ? snap.data() : {};
+    const cm = cur.months || {};
+    let saved = 0, kept = 0;
+    const out = {store, no:Number(no), year:Number(year), months:{}};
+    EXT_FIELDS.forEach(f=>{
+      const cv = cur[f] || '';
+      if(!isAdmin && cv){ if(rec[f] && rec[f]!==cv) kept++; rec[f] = cv; }
+      else if((rec[f]||'') !== cv) saved++;
+      out[f] = rec[f] || (f==='managerSig' ? null : '');
+    });
+    if(!isAdmin && cur.jeongbu && (cur.kg||cur.serial)) rec.jeongbu = cur.jeongbu;
+    out.jeongbu = rec.jeongbu || '정';
+    rec.months.forEach((m,i)=>{
+      const k = String(i+1), c = cm[k];
+      if(cHas(c) && !isAdmin){
+        if(monthHas(m) && !sameMonth(m,c)) kept++;
+        m.day = c.d||''; m.name = c.n||''; m.sig = c.s||null;
+        out.months[k] = c; return;
       }
-      m.synced = true; saved++;
-    }catch(e){
-      if(String(e.code||'')==='23505'){ kept++; continue; } // 동시에 다른 폰이 저장
-      throw e;
-    }
-  }
-  return {saved, kept};
+      if(monthHas(m)){
+        out.months[k] = {d:m.day||'', n:m.name||'', s:m.sig||null};
+        if(!cHas(c) || !sameMonth(m,c)) saved++;
+      } else if(cHas(c)) out.months[k] = c;   // 관리자도 빈 칸으로는 안 지움 (✕ 버튼으로만 삭제)
+    });
+    out.updatedAt = Date.now();
+    tx.set(ref, out);
+    result = {saved, kept};
+  }), 25000);
+  rec.syncedExt = rec.syncedExt || {};
+  EXT_FIELDS.forEach(f=>{ rec.syncedExt[f] = !!rec[f]; });
+  rec.months.forEach(m=>{ m.synced = monthHas(m); });
+  return result;
 }
 
 let saving = false;
@@ -1085,12 +1069,7 @@ async function saveDraft(){
     const r = await cloudSave(store, no, year, rec);
     saveRecordObj(rec);
     removePending(id);
-    if(rec===currentRecord){
-      const c = await fetchCloud(store, no, year).catch(()=>null);
-      if(c && rec===currentRecord) applyCloud(rec, c);
-      saveRecordObj(rec);
-      renderAll();
-    }
+    if(rec===currentRecord) renderAll();
     setSync('ok','✓ 공용 저장 완료' + (r.kept ? ' · 이미 저장된 '+r.kept+'개 항목은 기존 기록 유지' : ''));
     showToast(r.kept ? '저장 완료 (기존 기록 '+r.kept+'개는 관리자만 수정 가능)' : '전체 공용 저장 완료');
   }catch(e){
@@ -1106,7 +1085,7 @@ function getPending(){ try{ return JSON.parse(localStorage.getItem(PENDING_KEY)|
 function addPending(id){ const p = getPending(); if(!p.includes(id)){ p.push(id); localStorage.setItem(PENDING_KEY, JSON.stringify(p)); } }
 function removePending(id){ localStorage.setItem(PENDING_KEY, JSON.stringify(getPending().filter(x=>x!==id))); }
 async function flushPending(){
-  if(saving || !navigator.onLine || !sb) return;
+  if(saving || !navigator.onLine) return;
   const list = getPending(); if(!list.length) return;
   saving = true;
   let done = 0;
@@ -1119,12 +1098,30 @@ async function flushPending(){
     }
   }finally{ saving = false; }
   if(done){
-    showToast('대기 중이던 기록 '+done+'건 공용 저장 완료');
+    showToast('이 폰에 있던 기록 '+done+'건 공용 저장 완료');
     if(extNo()){ currentRecord = loadRecord(currentStore, currentPosition, currentRecord.year); refreshCloudForCurrent(); }
   }
 }
 window.addEventListener('online', flushPending);
-setTimeout(flushPending, 2000);
+
+/* 새 버전 첫 실행: 이 폰에 남아 있던 기존 기록을 모두 Firebase로 옮김 (기존 내용 보존) */
+(function migrateLocal(){
+  try{
+    if(localStorage.getItem('cwyfire2_fb_migrated')==='1') return;
+    const all = JSON.parse(localStorage.getItem(RECORD_KEY) || '{}');
+    Object.keys(all).forEach(key=>{
+      const r = all[key]; if(!r || !r.months) return;
+      const no = parseInt(String(r.position||'').replace(/\D/g,''),10); if(!no) return;
+      r.months.forEach(m=>{ m.synced = false; });
+      r.syncedExt = {};
+      const has = r.months.some(monthHas) || EXT_FIELDS.some(f=>r[f]);
+      if(has) addPending(r.store+'|'+no+'|'+r.year);
+    });
+    localStorage.setItem(RECORD_KEY, JSON.stringify(all));
+    localStorage.setItem('cwyfire2_fb_migrated','1');
+  }catch(e){ console.error(e); }
+})();
+setTimeout(flushPending, 2500);
 
 /* ================= 관리자 ================= */
 function updateAdminBtn(){
@@ -1156,33 +1153,19 @@ function adminLogout(){
   updateAdminBtn(); closeAdmin(); renderAll();
   showToast('관리자 모드 종료');
 }
-
-/* DB에 관리자 함수가 설치되어 있으면 그것을 쓰고, 없으면 직접 삭제 */
-function isMissingFn(err){ return err && (String(err.code||'')==='PGRST202' || /Could not find the function|function .* does not exist/i.test(String(err.message||''))); }
-async function adminRpcOrDirect(rpcName, rpcArgs, directFn){
-  const r = await withTimeout(sb.rpc(rpcName, Object.assign({p_pin:ADMIN_PIN}, rpcArgs)), 15000);
-  if(!r.error) return;
-  if(!isMissingFn(r.error)) throw r.error;
-  await directFn();
+async function adminUpdate(changes){
+  const db = await withTimeout(getDb(), 20000);
+  const ref = docRef(db, currentStore, extNo(), currentRecord.year);
+  await withTimeout(ref.set(Object.assign({updatedAt:Date.now()}, changes), {merge:true}), 20000);
+  return ref;
 }
-async function adminSaveMonth(store,no,year,i,m){
-  await adminRpcOrDirect('fire_admin_save_month',
-    {p_store:store, p_no:no, p_year:Number(year), p_month:i+1, p_inspector:m.name||'', p_note:m.day||'', p_signature:m.sig||null},
-    async ()=>{ throw {message:'row-level policy'}; });
-}
-async function directDelete(table, match, expectRows){
-  const d = await q(()=>{ let b = sb.from(table).delete(); Object.keys(match).forEach(k=>{ b = b.eq(k, match[k]); }); return b.select(); });
-  if(expectRows && (!d.data || d.data.length===0)) throw {message:'row-level policy'};
-}
-
 async function adminDeleteMonth(i){
   if(!isAdmin) return;
-  const no = extNo(), store = currentStore, year = Number(currentRecord.year);
+  const no = extNo(), store = currentStore, year = currentRecord.year;
   if(!confirm(`${store} 소화기 ${no} · ${year}년 ${i+1}월 기록을 삭제할까요?\n모든 폰에서 사라집니다.`)) return;
   try{
-    const had = lockState.months[i] || currentRecord.months[i].synced;
-    await adminRpcOrDirect('fire_admin_delete_month', {p_store:store, p_no:no, p_year:year, p_month:i+1},
-      ()=>directDelete('fire_inspections', {store, extinguisher_no:no, inspection_year:year, inspection_month:i+1}, had));
+    const db = await withTimeout(getDb(), 20000);
+    await withTimeout(docRef(db, store, no, year).update(new firebase.firestore.FieldPath('months', String(i+1)), firebase.firestore.FieldValue.delete(), 'updatedAt', Date.now()), 20000);
     const m = currentRecord.months[i]; m.day=''; m.name=''; m.sig=null; m.synced=false; lockState.months[i]=false;
     saveRecordObj(currentRecord); renderAll();
     showToast(`${i+1}월 기록 삭제 완료`);
@@ -1190,13 +1173,12 @@ async function adminDeleteMonth(i){
 }
 async function adminDeleteYear(){
   if(!isAdmin) return;
-  const no = extNo(), store = currentStore, year = Number(currentRecord.year);
+  const no = extNo(), store = currentStore, year = currentRecord.year;
   if(!confirm(`${store} 소화기 ${no} · ${year}년 월별 점검 기록 전체를 삭제할까요?\n되돌릴 수 없습니다.`)) return;
   try{
-    await adminRpcOrDirect('fire_admin_delete_year', {p_store:store, p_no:no, p_year:year},
-      ()=>directDelete('fire_inspections', {store, extinguisher_no:no, inspection_year:year}, lockState.months.some(x=>x)));
+    await adminUpdate({months:{}});
     currentRecord.months = blankMonths(); resetLock();
-    saveRecordObj(currentRecord); closeAdmin(); refreshCloudForCurrent();
+    saveRecordObj(currentRecord); closeAdmin(); renderAll();
     showToast(year+'년 기록 전체 삭제 완료');
   }catch(e){ console.error(e); showToast('삭제 실패: '+errMsg(e)); }
 }
@@ -1205,11 +1187,10 @@ async function adminDeleteExt(){
   const no = extNo(), store = currentStore;
   if(!confirm(`${store} 소화기 ${no}의 정보(종류·일련번호·점검관리자·서명)를 삭제할까요?`)) return;
   try{
-    await adminRpcOrDirect('fire_admin_delete_ext', {p_store:store, p_no:no},
-      ()=>directDelete('fire_extinguishers', {store, extinguisher_no:no}, lockState.kg||lockState.serial||lockState.managerName||lockState.managerSig));
+    await adminUpdate({kg:'', serial:'', managerName:'', managerSig:null, jeongbu:'정'});
     currentRecord.kg=''; currentRecord.serial=''; currentRecord.managerName=''; currentRecord.managerSig=null; currentRecord.jeongbu='정';
     currentRecord.syncedExt = {};
-    saveRecordObj(currentRecord); closeAdmin(); refreshCloudForCurrent();
+    saveRecordObj(currentRecord); closeAdmin(); renderAll();
     showToast('소화기 정보 삭제 완료');
   }catch(e){ console.error(e); showToast('삭제 실패: '+errMsg(e)); }
 }
@@ -1223,6 +1204,54 @@ function applyLockUI(){
   });
   const mb = document.getElementById('managerSigBox');
   if(mb) mb.classList.toggle('lockedField', isLocked('manager'));
+}
+
+/* ================= 버전 · 옛 캐시 정리 ================= */
+(function(){
+  try{
+    if(localStorage.getItem('cwyfire2_appver') !== APP_VERSION){
+      localStorage.setItem('cwyfire2_appver', APP_VERSION);
+      if(window.caches) caches.keys().then(ks=>ks.forEach(k=>caches.delete(k)));
+      if(navigator.serviceWorker) navigator.serviceWorker.getRegistrations().then(rs=>rs.forEach(r=>r.update()));
+    }
+  }catch(e){}
+})();
+
+/* ================= 연결 테스트 ================= */
+async function runDiagnostic(){
+  const box = document.getElementById('diagOut');
+  document.getElementById('diagModal').classList.add('show');
+  const out = [];
+  const add = (ok, t)=>{ out.push((ok===null?'ℹ️ ':ok?'✅ ':'❌ ')+t); box.textContent = out.join('\n'); };
+  box.textContent = '확인 중…';
+  add(null, '앱 버전 v'+APP_VERSION+' (Firebase) · '+new Date().toLocaleString('ko-KR'));
+  add(navigator.onLine, '인터넷 연결');
+  let db = null;
+  try{ db = await withTimeout(getDb(), 20000); add(true, 'Firebase 연결 준비'); }
+  catch(e){ add(false, 'Firebase 연결 도구를 못 불러옴: '+errMsg(e)); return; }
+  const testRef = db.collection(FS_COL).doc('__진단__');
+  try{ await withTimeout(testRef.set({t:Date.now(), s:'data:image/png;base64,'+'A'.repeat(20000)}), 20000); add(true, '저장 성공 (서명 크기 포함)'); }
+  catch(e){ add(false, '저장 실패: '+errMsg(e)); }
+  try{ const s = await withTimeout(testRef.get({source:'server'}), 20000); add(s.exists, '불러오기 '+(s.exists?'성공':'실패 (저장한 내용을 다시 못 읽음)')); }
+  catch(e){ add(false, '불러오기 실패: '+errMsg(e)); }
+  try{ await withTimeout(testRef.delete(), 20000); add(true, '테스트 기록 정리 완료'); }catch(e){ add(null, '테스트 기록 정리 안 됨: '+errMsg(e)); }
+  if(extNo()){
+    try{
+      const s = await withTimeout(docRef(db, currentStore, extNo(), currentRecord.year).get({source:'server'}), 20000);
+      const d = s.exists ? s.data() : {};
+      const n = Object.values(d.months||{}).filter(cHas).length;
+      const kb = s.exists ? Math.round(JSON.stringify(d).length/1024) : 0;
+      add(true, currentStore+' 소화기 '+extNo()+' '+currentRecord.year+'년: 공용에 저장된 월 '+n+'개 (용량 약 '+kb+'KB / 한도 1000KB)');
+      add(null, '이 폰에서 아직 안 올라간 칸: '+currentRecord.months.filter(m=>monthHas(m)&&!m.synced).length+'개');
+    }catch(e){ add(false, '현재 기록 확인 실패: '+errMsg(e)); }
+  }
+  const pend = getPending();
+  add(null, '전송 대기 중: '+pend.length+'건');
+}
+function shareDiag(){
+  const t = document.getElementById('diagOut').textContent;
+  if(navigator.share) navigator.share({title:'소방안전 연결 테스트', text:t}).catch(()=>{});
+  else if(navigator.clipboard) navigator.clipboard.writeText(t).then(()=>showToast('결과를 복사했어요'));
 }
 
 /* ================= 메뉴형 매장/소화기 선택 ================= */
@@ -1285,7 +1314,7 @@ window.addEventListener('appinstalled', function(){
 
 if('serviceWorker' in navigator){
   window.addEventListener('load', function(){
-    navigator.serviceWorker.register('sw.js').catch(function(err){
+    navigator.serviceWorker.register('sw.js?v='+APP_VERSION).catch(function(err){
       console.log('SW registration failed', err);
     });
   });
