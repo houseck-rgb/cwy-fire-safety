@@ -125,7 +125,7 @@
   <button class="histBtn" onclick="openHistory()">📋 기록</button>
   <button class="diagBtn" onclick="runDiagnostic()">🔧 연결 테스트</button>
   <div class="title">소방안전</div>
-  <div class="sub">매장별 소화기 월간 점검 · <span id="verLabel">v3.1</span></div>
+  <div class="sub">매장별 소화기 월간 점검 · <span id="verLabel">v3.2</span></div>
 </header>
 
 
@@ -384,10 +384,28 @@ function loadRecord(store, position, year){
     months: blankMonths()
   };
 }
+/* 폰 저장 공간(약 5MB)이 가득 차도 멈추지 않게: 오래된 '이미지 기록'부터 지우고 다시 저장 */
+function safeSet(key, val){
+  try{ localStorage.setItem(key, val); return true; }catch(e){}
+  try{
+    let hist = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+    while(hist.length){
+      hist.pop();
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(hist));
+      try{ localStorage.setItem(key, val); return true; }catch(e){}
+    }
+    localStorage.removeItem(HISTORY_KEY);
+    localStorage.setItem(key, val); return true;
+  }catch(e){
+    if(typeof showToast==='function') showToast('폰 저장 공간이 부족해요 (공용 저장은 계속 됩니다)');
+    return false;
+  }
+}
 function saveRecordObj(rec){
-  const all = JSON.parse(localStorage.getItem(RECORD_KEY) || '{}');
+  let all = {};
+  try{ all = JSON.parse(localStorage.getItem(RECORD_KEY) || '{}'); }catch(e){}
   all[recordId(rec.store, rec.position, rec.year)] = rec;
-  localStorage.setItem(RECORD_KEY, JSON.stringify(all));
+  safeSet(RECORD_KEY, JSON.stringify(all));
 }
 
 let currentRecord = loadRecord(currentStore, currentPosition, thisYear);
@@ -517,6 +535,9 @@ function clearSigPad(){
   sigCtx.fillRect(0,0,rect.width,rect.height);
 }
 function saveSignature(){
+  try{ saveSignatureInner(); }catch(e){ console.error(e); closeSignature(); showToast('서명 저장 중 오류: 다시 시도해주세요'); }
+}
+function saveSignatureInner(){
   const canvas = document.getElementById('sigPad');
   if(!canvas.width || !canvas.height){
     showToast('서명판이 아직 준비되지 않았어요. 다시 시도해주세요');
@@ -842,10 +863,49 @@ async function shareReport(){
 
 /* ================= 기록 ================= */
 function addToHistory(dataUrl){
-  const hist = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
-  hist.unshift({ store: currentRecord.store, position: currentRecord.position, year: currentRecord.year, img: dataUrl, ts: Date.now() });
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(hist.slice(0,60)));
+  // 기록용은 작게(JPEG) 최근 5개만 보관 → 폰 저장 공간이 차지 않음
+  const img = new Image();
+  img.onload = ()=>{
+    const w = 600, h = Math.round(img.height * w / img.width);
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0,0,w,h); x.drawImage(img,0,0,w,h);
+    let hist = [];
+    try{ hist = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'); }catch(e){}
+    hist.unshift({ store: currentRecord.store, position: currentRecord.position, year: currentRecord.year, img: c.toDataURL('image/jpeg', 0.7), ts: Date.now() });
+    hist = hist.slice(0,5);
+    while(hist.length){ try{ localStorage.setItem(HISTORY_KEY, JSON.stringify(hist)); break; }catch(e){ hist.pop(); } }
+  };
+  img.src = dataUrl;
 }
+/* 시작할 때 한 번: 예전의 큰 서명·이미지 기록을 작게 줄여 저장 공간 확보 */
+(function shrinkOldData(){
+  try{
+    let hist = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+    if(hist.length > 5 || hist.some(h=>h.img && h.img.length > 400000)){
+      hist = hist.filter(h=>h.img && h.img.length <= 400000).slice(0,5);
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(hist));
+    }
+  }catch(e){ try{ localStorage.removeItem(HISTORY_KEY); }catch(_){} }
+  let all;
+  try{ all = JSON.parse(localStorage.getItem(RECORD_KEY) || '{}'); }catch(e){ return; }
+  const jobs = [];
+  const shrink = (src)=>new Promise(res=>{
+    const im = new Image();
+    im.onload = ()=>{ const w=320, h=Math.round(im.height*w/im.width); const c=document.createElement('canvas'); c.width=w; c.height=h;
+      const x=c.getContext('2d'); x.fillStyle='#ffffff'; x.fillRect(0,0,w,h); x.drawImage(im,0,0,w,h); res(c.toDataURL('image/png')); };
+    im.onerror = ()=>res(src);
+    im.src = src;
+  });
+  Object.values(all).forEach(r=>{
+    if(!r) return;
+    if(r.managerSig && r.managerSig.length > 30000) jobs.push(shrink(r.managerSig).then(v=>{ r.managerSig = v; if(r.syncedExt) r.syncedExt.managerSig = false; }));
+    (r.months||[]).forEach(m=>{ if(m.sig && m.sig.length > 30000) jobs.push(shrink(m.sig).then(v=>{ m.sig = v; m.synced = false; })); });
+  });
+  if(jobs.length) Promise.all(jobs).then(()=>{
+    safeSet(RECORD_KEY, JSON.stringify(all));
+    if(typeof currentRecord!=='undefined' && currentRecord){ const k = recordId(currentRecord.store, currentRecord.position, currentRecord.year); if(all[k]) Object.assign(currentRecord, all[k]); }
+  });
+})();
 function openHistory(){
   const hist = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
   const wrap = document.getElementById('historyList');
@@ -886,7 +946,7 @@ const FB_CONFIG = {
 const FS_COL = 'fireSafetyRecords';      // 소화기 1대 · 1년 = 문서 1개 (용량 최소화)
 const ADMIN_PIN = '5324';
 const PENDING_KEY = 'cwyfire2_pending_v1';
-const APP_VERSION = '3.1';
+const APP_VERSION = '3.2';
 const EXT_FIELDS = ['kg','serial','managerName','managerSig'];
 
 let fdb = null, fbLoading = null;
